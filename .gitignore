@@ -1,0 +1,12 @@
+# Build output folders
+bin/
+obj/
+
+# IDE specifični fajlovi (Code::Blocks)
+*.layout
+*.depend
+*.cbp
+
+# Log i privremeni fajlovi
+*.log
+*.tmp
