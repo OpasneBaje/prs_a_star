@@ -1,3 +1,5 @@
+
+//std::numeric_limits<float>::infinity();
 #include <iostream>
 #include <queue>
 #include <vector>
@@ -5,7 +7,126 @@
 #include <math.h>
 #include <chrono>
 #include <random>
-//std::numeric_limits<float>::infinity();
+#include <tuple>
+#include <limits>
+#include <algorithm>
+#include <fstream>
+#include <omp.h>
+#include <immintrin.h>
+
+template<int D = 4>
+class DaryHeap {
+private:
+    std::vector<int> indices;
+    std::vector<float> f_costs;
+    std::vector<float> g_costs;
+    std::vector<int> parents;
+
+    void siftUp(int pos) {
+        int parent_pos = (pos - 1) / D;
+
+        float my_f = f_costs[pos];
+        int my_idx = indices[pos];
+        float my_g = g_costs[pos];
+        int my_parent = parents[pos];
+
+        while(pos > 0 && my_f < f_costs[parent_pos]) {
+            indices[pos] = indices[parent_pos];
+            f_costs[pos] = f_costs[parent_pos];
+            g_costs[pos] = g_costs[parent_pos];
+            parents[pos] = parents[parent_pos];
+
+            pos = parent_pos;
+            parent_pos = (pos - 1) / D;
+        }
+
+        indices[pos] = my_idx;
+        f_costs[pos] = my_f;
+        g_costs[pos] = my_g;
+        parents[pos] = my_parent;
+    }
+
+    void siftDown(int pos) {
+        int size = f_costs.size();
+
+        float my_f = f_costs[pos];
+        int my_idx = indices[pos];
+        float my_g = g_costs[pos];
+        int my_parent = parents[pos];
+
+        while(true) {
+            int first_child = D * pos + 1;
+            if(first_child >= size) break;
+
+            int smallest_child = first_child;
+            float smallest_f = f_costs[first_child];
+
+            int last_child = std::min(first_child + D, size);
+            for(int child = first_child + 1; child < last_child; child++) {
+                if(f_costs[child] < smallest_f) {
+                    smallest_child = child;
+                    smallest_f = f_costs[child];
+                }
+            }
+
+            if(my_f <= smallest_f) break;
+
+            indices[pos] = indices[smallest_child];
+            f_costs[pos] = f_costs[smallest_child];
+            g_costs[pos] = g_costs[smallest_child];
+            parents[pos] = parents[smallest_child];
+
+            pos = smallest_child;
+        }
+
+        indices[pos] = my_idx;
+        f_costs[pos] = my_f;
+        g_costs[pos] = my_g;
+        parents[pos] = my_parent;
+    }
+
+public:
+    void reserve(size_t capacity) {
+        indices.reserve(capacity);
+        f_costs.reserve(capacity);
+        g_costs.reserve(capacity);
+        parents.reserve(capacity);
+    }
+
+    void push(int idx, float f, float g, int parent) {
+        indices.push_back(idx);
+        f_costs.push_back(f);
+        g_costs.push_back(g);
+        parents.push_back(parent);
+        siftUp(indices.size() - 1);
+    }
+
+    std::tuple<int, float, float, int> pop() {
+        int result_idx = indices[0];
+        float result_f = f_costs[0];
+        float result_g = g_costs[0];
+        int result_parent = parents[0];
+
+        int last = indices.size() - 1;
+        indices[0] = indices[last];
+        f_costs[0] = f_costs[last];
+        g_costs[0] = g_costs[last];
+        parents[0] = parents[last];
+
+        indices.pop_back();
+        f_costs.pop_back();
+        g_costs.pop_back();
+        parents.pop_back();
+
+        if(!indices.empty())
+            siftDown(0);
+
+        return {result_idx, result_f, result_g, result_parent};
+    }
+
+    bool empty() const { return indices.empty(); }
+    size_t size() const { return indices.size(); }
+};
 
 class Graf {
 private:
@@ -99,7 +220,6 @@ public:
     return -1.0f;
 
   }
-  //Bolji hit rate i manje ubacivanje u heap
   float A_star_v2(std::pair<int,int>start, std::pair<int,int>finish) {
     if(start.first < 0 || start.first >= broj_redova ||
        start.second < 0 || start.second >= broj_kolona ||
@@ -172,106 +292,206 @@ public:
 
     return -1.0f;
   }
+  //Bolji hit rate i manje ubacivanje u heap
+  std::pair<float, std::vector<int>> A_star_v3(std::pair<int,int>start, std::pair<int,int>finish) {
+    if(start.first < 0 || start.first >= broj_redova ||
+       start.second < 0 || start.second >= broj_kolona ||
+       finish.first < 0 || finish.first >= broj_redova ||
+       finish.second < 0 || finish.second >= broj_kolona) {
+        throw std::domain_error("Start ili finis van granica");
+    }
+
+    int index_trenutniCvor = start.first * broj_kolona + start.second;
+    int index_finishCvor = finish.first * broj_kolona + finish.second;
+
+    const int dx[8] = { 0, -1, 0, 1, -1, -1, 1, 1 };
+    const int dy[8] = { 1, 0, -1, 0, 1, -1, 1, -1 };
+
+    std::vector<std::tuple<bool, float, int>>/*obradjen, g(n) ili f(n) ako niej obradjen, od kojeg cvora je dobio */ obradjeniCvorovi(broj_redova * broj_kolona, std::make_tuple(false, std::numeric_limits<float>::infinity(), 0));
+    DaryHeap<4> minHeap;
+    minHeap.reserve(broj_redova * broj_kolona / 20);
+    minHeap.push(index_trenutniCvor, 0, 0, 0);
+
+    std::vector<float> heuristika_za_okolne_cvorove(8);
+    std::tuple<int,float,float,int> trenutniCvor;
+
+    while(!minHeap.empty()) {
+        trenutniCvor = minHeap.pop();
+
+        if(std::get<0>(trenutniCvor) == index_finishCvor){
+          std::vector<int> putanja;
+          index_trenutniCvor = std::get<0>(trenutniCvor);
+
+          obradjeniCvorovi[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+
+          int trenutni = index_finishCvor;
+          int start_index = start.first * broj_kolona + start.second;
+
+          while(trenutni != start_index) {
+              putanja.push_back(trenutni);
+              trenutni = std::get<2>(obradjeniCvorovi[trenutni]);
+          }
+          putanja.push_back(start_index);  // dodaj i start
+
+          return {std::get<2>(trenutniCvor), putanja};
+        }
+
+        index_trenutniCvor = std::get<0>(trenutniCvor);
+
+        if(std::get<0>(obradjeniCvorovi[index_trenutniCvor]))
+            continue;
+
+        int x = index_trenutniCvor / broj_kolona;
+        int y = index_trenutniCvor % broj_kolona;
+//uporediti ovaj nacin  i verziju sa memorisanjem
+//spstiti bad speculation na manje od 5 %
+        // Heuristika za okolne čvorove
+        for(int i = 0; i < 8; i++)
+            heuristika_za_okolne_cvorove[i] = Heuristika(x + dx[i], y + dy[i], finish.first, finish.second, 1.0f);
+// probaj odmotati petlju, max 2 threada
+        for(int i = 0; i < 8; i++) {
+            int nx = x + dx[i];
+            int ny = y + dy[i];
+            //smanjiti grid za 1, pa ovaj uslov nece biti potreban
+            if(nx < 0 || nx >= broj_redova || ny < 0 || ny >= broj_kolona)
+                continue;
+
+            int weight_index = index_trenutniCvor * 8 + i;
+            if(cvorovi_v2[weight_index] == std::numeric_limits<float>::infinity())
+                continue;
+
+            int index_susjeda = nx * broj_kolona + ny;
+            if(!std::get<0>(obradjeniCvorovi[index_susjeda])) {
+                float g_novo = std::get<2>(trenutniCvor) + cvorovi_v2[weight_index];
+                float f_novo = g_novo + heuristika_za_okolne_cvorove[i];
+                if(f_novo < std::get<1>(obradjeniCvorovi[index_susjeda])){
+                  minHeap.push(index_susjeda, f_novo, g_novo, index_trenutniCvor);
+                  std::get<1>(obradjeniCvorovi[index_susjeda]) = f_novo;
+                }
+            }
+        }
+
+        obradjeniCvorovi[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+    }
+
+    return {-1., std::vector<int>(0)};
+  }
+  //Paralelizacija
+  std::pair<float, std::vector<int>> A_star_v4(std::pair<int,int>start, std::pair<int,int>finish) {
+    if(start.first < 0 || start.first >= broj_redova ||
+       start.second < 0 || start.second >= broj_kolona ||
+       finish.first < 0 || finish.first >= broj_redova ||
+       finish.second < 0 || finish.second >= broj_kolona) {
+        throw std::domain_error("Start ili finis van granica");
+    }
+
+    int index_trenutniCvor = start.first * broj_kolona + start.second;
+    int index_finishCvor = finish.first * broj_kolona + finish.second;
+
+    const int dx[8] = { 0, -1, 0, 1, -1, -1, 1, 1 };
+    const int dy[8] = { 1, 0, -1, 0, 1, -1, 1, -1 };
+
+    std::vector<std::tuple<bool, float, int>>/*obradjen, g(n) ili f(n) ako niej obradjen, od kojeg cvora je dobio */ obradjeniCvorovi(broj_redova * broj_kolona, std::make_tuple(false, std::numeric_limits<float>::infinity(), 0));
+    DaryHeap<4> minHeap;
+    minHeap.reserve(broj_redova * broj_kolona / 20);
+    minHeap.push(index_trenutniCvor, 0, 0, 0);
+
+    std::vector<float> heuristika_za_okolne_cvorove(8);
+    std::tuple<int,float,float,int> trenutniCvor;
+
+    while(!minHeap.empty()) {
+        trenutniCvor = minHeap.pop();
+
+        if(std::get<0>(trenutniCvor) == index_finishCvor){
+          std::vector<int> putanja;
+          index_trenutniCvor = std::get<0>(trenutniCvor);
+
+          obradjeniCvorovi[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+
+          int trenutni = index_finishCvor;
+          int start_index = start.first * broj_kolona + start.second;
+
+          while(trenutni != start_index) {
+              putanja.push_back(trenutni);
+              trenutni = std::get<2>(obradjeniCvorovi[trenutni]);
+          }
+          putanja.push_back(start_index);  // dodaj i start
+
+          return {std::get<2>(trenutniCvor), putanja};
+        }
+
+        index_trenutniCvor = std::get<0>(trenutniCvor);
+
+        if(std::get<0>(obradjeniCvorovi[index_trenutniCvor]))
+            continue;
+
+        int x = index_trenutniCvor / broj_kolona;
+        int y = index_trenutniCvor % broj_kolona;
+//uporediti ovaj nacin  i verziju sa memorisanjem
+//spstiti bad speculation na manje od 5 %
+        // Heuristika za okolne čvorove
+        //#pragma omp parallel for num_threads(2)
+        //for(int i = 0; i < 8; i++)
+            //heuristika_za_okolne_cvorove[i] = Heuristika(x + dx[i], y + dy[i], finish.first, finish.second, 1.0f);
+            /*
+          heuristika_za_okolne_cvorove[0] = Heuristika(x, y + 1, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[1] = Heuristika(x - 1, y, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[2] = Heuristika(x, y - 1, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[3] = Heuristika(x + 1, y, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[4] = Heuristika(x - 1, y + 1, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[5] = Heuristika(x - 1, y - 1, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[6] = Heuristika(x + 1, y + 1, finish.first, finish.second, 1.0f);
+          heuristika_za_okolne_cvorove[7] = Heuristika(x + 1, y - 1, finish.first, finish.second, 1.0f);*/
+          alignas(32) float heuristika_za_okolne_cvorove[8];
+
+          __m256 finish_x = _mm256_set1_ps(finish.first);
+          __m256 finish_y = _mm256_set1_ps(finish.second);
+
+          __m256 nx_vec = _mm256_set_ps(x+1, x+1, x-1, x-1, x+1, x, x-1, x);
+          __m256 ny_vec = _mm256_set_ps(y-1, y+1, y-1, y+1, y, y-1, y, y+1);
+
+          __m256 dx_vec = _mm256_sub_ps(nx_vec, finish_x);
+          __m256 dy_vec = _mm256_sub_ps(ny_vec, finish_y);
+
+          __m256 dx2 = _mm256_mul_ps(dx_vec, dx_vec);
+          __m256 dy2 = _mm256_mul_ps(dy_vec, dy_vec);
+          __m256 dist = _mm256_sqrt_ps(_mm256_add_ps(dx2, dy2));
+
+          _mm256_store_ps(heuristika_za_okolne_cvorove, dist);
+
+// probaj odmotati petlju, max 2 threada
+        for(int i = 0; i < 8; i++) {
+            int nx = x + dx[i];
+            int ny = y + dy[i];
+            //smanjiti grid za 1, pa ovaj uslov nece biti potreban
+            if(nx < 0 || nx >= broj_redova || ny < 0 || ny >= broj_kolona)
+                continue;
+
+            int weight_index = index_trenutniCvor * 8 + i;
+            if(cvorovi_v2[weight_index] == std::numeric_limits<float>::infinity())
+                continue;
+
+            int index_susjeda = nx * broj_kolona + ny;
+            if(!std::get<0>(obradjeniCvorovi[index_susjeda])) {
+                float g_novo = std::get<2>(trenutniCvor) + cvorovi_v2[weight_index];
+                float f_novo = g_novo + heuristika_za_okolne_cvorove[i];
+                if(f_novo < std::get<1>(obradjeniCvorovi[index_susjeda])){
+                  minHeap.push(index_susjeda, f_novo, g_novo, index_trenutniCvor);
+                  std::get<1>(obradjeniCvorovi[index_susjeda]) = f_novo;
+                }
+            }
+        }
+
+        obradjeniCvorovi[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+    }
+
+    return {-1., std::vector<int>(0)};
+  }
 };
 int main()
 {
-  /*
-  const int rows = 10;
-  const int cols = 10;
-
-  std::vector<std::vector<float>> cvorovi(rows*cols, std::vector<float>(8, 1.0f));
-
-  cvorovi[21][0] = 100.0f;
-  cvorovi[21][1] = 150.0f;
-  cvorovi[21][2] = 150.0f;
-  cvorovi[21][3] = 150.0f;
-  cvorovi[21][4] = 150.0f;
-  cvorovi[21][5] = 150.0f;
-  cvorovi[21][6] = 150.0f;
-  cvorovi[21][7] = 150.0f;
-
-  std::pair<int,int> start = {2,1};
-  std::pair<int,int> finish = {7,1};
-
-  Graf graf(cvorovi, rows, cols);
-  float path_cost = graf.A_star(start, finish);
-
-  if(path_cost >= 0)
-      std::cout << "Najkraci put od (" << start.first << "," << start.second << ") do ("
-                << finish.first << "," << finish.second << ") ima cijenu: " << path_cost << "\n";
-
-    std::vector<std::vector<float>> cvorovi(rows * cols, std::vector<float>(8, 1.0f));
-    std::pair<int,int> start = {0, 0};
-    std::pair<int,int> finish = {9999, 9999};
-    Graf graf(cvorovi, rows, cols);
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    int path_cost = graf.A_star(start, finish);
-    auto t2 = std::chrono::high_resolution_clock::now();
-
-    std::chrono::duration<double> trajanje = t2 - t1;
-
-    if (path_cost >= 0)
-        std::cout << "Najkraci put ima cijenu: " << path_cost << "\n";
-    else
-        std::cout << "Put nije pronadjen!\n";
-
-    std::cout << "Vrijeme izvrsavanja: " << trajanje.count() << " sekundi\n";
-
-
-
-    std::vector<float> cvorovi_v2(rows * cols * 8, 1.0f); // sve težine 1.0f
-
-    std::pair<int,int> start = {0, 0};
-    std::pair<int,int> finish = {rows - 1, cols - 1};
-
-    // Napravimo graf koristeći flattenovani vektor
-    Graf graf(cvorovi_v2, rows, cols);
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    float path_cost = graf.A_star_v2(start, finish); // koristi flattenovani vektor
-    auto t2 = std::chrono::high_resolution_clock::now();
-
-    std::chrono::duration<double> trajanje = t2 - t1;
-
-    if (path_cost >= 0)
-        std::cout << "Najkraci put ima cijenu: " << path_cost << "\n";
-    else
-        std::cout << "Put nije pronadjen!\n";
-
-    std::cout << "Vrijeme izvrsavanja: " << trajanje.count() << " sekundi\n";
-
     const int rows = 10000;
     const int cols = 10000;
-    std::pair<int,int> start = {0, 0};
-    std::pair<int,int> finish = {rows - 1, cols - 1};
-    {
-      std::cout << "Priprema 2D vektora..." << std::endl;
-      std::vector<std::vector<float>> cvorovi2d(rows * cols, std::vector<float>(8, 1.0f));
-
-      std::cout << "Test sa 2D vektorom..." << std::endl;
-      Graf graf2d(cvorovi2d, rows, cols);
-      auto t1 = std::chrono::high_resolution_clock::now();
-      float path_cost_2d = graf2d.A_star(start, finish);
-      auto t2 = std::chrono::high_resolution_clock::now();
-      std::chrono::duration<double> trajanje2d = t2 - t1;
-      std::cout << "Vrijeme (2D vector): " << trajanje2d.count() << " sekundi\n";
-    }
-    {
-      std::cout << "Priprema flattenovanog vektora..." << std::endl;
-      std::vector<float> cvorovi_flat(rows * cols * 8, 1.0f);
-
-      std::cout << "Test sa flattenovanim vektorom..." << std::endl;
-      Graf graf_flat(cvorovi_flat, rows, cols);
-      auto t3 = std::chrono::high_resolution_clock::now();
-      float path_cost_flat = graf_flat.A_star_v2(start, finish);
-      auto t4 = std::chrono::high_resolution_clock::now();
-      std::chrono::duration<double> trajanje_flat = t4 - t3;
-      std::cout << "Vrijeme (flatten vector): " << trajanje_flat.count() << " sekundi\n";
-    }*/
-
-    const int rows = 12000;
-    const int cols = 12000;
     std::pair<int,int> start = {0, 0};
     std::pair<int,int> finish = {rows - 1, cols - 1};
 
@@ -283,7 +503,7 @@ int main()
     std::cout << "Priprema mreze..." << std::endl;
 
     // 2D vector
-    std::vector<std::vector<float>> cvorovi2d(rows * cols, std::vector<float>(8));
+    //std::vector<std::vector<float>> cvorovi2d(rows * cols, std::vector<float>(8));
     // flatten vector
     std::vector<float> cvorovi_flat(rows * cols * 8);
 
@@ -298,13 +518,13 @@ int main()
                     value = dis(gen);
                 }
                 // popunjavamo oba vektora
-                cvorovi2d[x * cols + y][i] = value;
+                //cvorovi2d[x * cols + y][i] = value;
                 cvorovi_flat[index_flat + i] = value;
             }
         }
     }
 
-    // Test 2D vector
+    /* Test 2D vector
     std::cout << "Test 2D vector..." << std::endl;
     Graf graf2d(cvorovi2d, rows, cols);
     auto t1 = std::chrono::high_resolution_clock::now();
@@ -315,19 +535,32 @@ int main()
         std::cout << "Put pronadjen, cijena: " << path_cost_2d << "\n";
     else
         std::cout << "Put nije pronaden!\n";
-    std::cout << "Vrijeme (2D vector): " << trajanje2d.count() << " sekundi\n";
+    std::cout << "Vrijeme (2D vector): " << trajanje2d.count() << " sekundi\n";*/
+
+    std::cout << "Test flatten vector1..." << std::endl;
+    Graf graf_flat(cvorovi_flat, rows, cols);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto path_cost_flat1 = graf_flat.A_star_v3(start, finish);
+    auto t2 = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> trajanje_flat1 = t2 - t1;
+    if(path_cost_flat1.first >= 0)
+        std::cout << "Put pronadjen, cijena: " << path_cost_flat1.first << "\n";
+    else
+        std::cout << "Put nije pronaden!\n";
+    std::cout << "Vrijeme (flatten vector): " << trajanje_flat1.count() << " sekundi\n";
 
     // Test flatten vector
-    std::cout << "Test flatten vector..." << std::endl;
-    Graf graf_flat(cvorovi_flat, rows, cols);
+    std::cout << "Test flatten vector2..." << std::endl;
     auto t3 = std::chrono::high_resolution_clock::now();
-    float path_cost_flat = graf_flat.A_star_v2(start, finish);
+    auto path_cost_flat = graf_flat.A_star_v4(start, finish);
     auto t4 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> trajanje_flat = t4 - t3;
-    if(path_cost_flat >= 0)
-        std::cout << "Put pronadjen, cijena: " << path_cost_flat << "\n";
+    if(path_cost_flat.first >= 0)
+        std::cout << "Put pronadjen, cijena: " << path_cost_flat.first << "\n";
     else
         std::cout << "Put nije pronaden!\n";
     std::cout << "Vrijeme (flatten vector): " << trajanje_flat.count() << " sekundi\n";
+    int dfsuih;
+    std::cin >> dfsuih;
     return 0;
 }
