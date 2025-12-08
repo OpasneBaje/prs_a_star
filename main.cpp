@@ -13,6 +13,7 @@
 #include <fstream>
 #include <omp.h>
 #include <immintrin.h>
+#include <atomic>
 
 template<int D = 4>
 class DaryHeap {
@@ -135,9 +136,12 @@ private:
   int broj_redova, broj_kolona;
 
   static float Heuristika(int current_x, int current_y, int goal_x, int goal_y, float w_min) {
+    /*int dx = std::abs(goal_x - current_x);
+    int dy = std::abs(goal_y - current_y);
+    return w_min * std::sqrt(dx * dx + dy * dy);*/
     int dx = std::abs(goal_x - current_x);
     int dy = std::abs(goal_y - current_y);
-    return w_min * std::sqrt(dx * dx + dy * dy);
+    return w_min * (float)std::max(dx, dy);
   }
 public:
   Graf(const std::vector<std::vector<float>> &c, int r, int k) : cvorovi(c), cvorovi_v2(std::vector<float>(0)) {
@@ -150,6 +154,8 @@ public:
   }
   //Osnovna sekvencijalna metoda
   float A_star(std::pair<int,int>start, std::pair<int,int>finish) {
+  //Koristenje flatten vektora
+  //Koristenje 1D
      if(start.first < 0 || start.first >= broj_redova ||
         start.second < 0 || start.second >= broj_kolona ||
         finish.first < 0 || finish.first >= broj_redova ||
@@ -292,7 +298,7 @@ public:
 
     return -1.0f;
   }
-  //Bolji hit rate i manje ubacivanje u heap
+  //Bolji hit rate i manje ubacivanje u heap i drugi heap
   std::pair<float, std::vector<int>> A_star_v3(std::pair<int,int>start, std::pair<int,int>finish) {
     if(start.first < 0 || start.first >= broj_redova ||
        start.second < 0 || start.second >= broj_kolona ||
@@ -310,10 +316,10 @@ public:
     std::vector<std::tuple<bool, float, int>>/*obradjen, g(n) ili f(n) ako niej obradjen, od kojeg cvora je dobio */ obradjeniCvorovi(broj_redova * broj_kolona, std::make_tuple(false, std::numeric_limits<float>::infinity(), 0));
     DaryHeap<4> minHeap;
     minHeap.reserve(broj_redova * broj_kolona / 20);
-    minHeap.push(index_trenutniCvor, 0, 0, 0);
+    minHeap.push(index_trenutniCvor, 0, 0, 0);/*cvor, f(n), g(n), od_koga*/
 
     std::vector<float> heuristika_za_okolne_cvorove(8);
-    std::tuple<int,float,float,int> trenutniCvor;
+    std::tuple<int,float,float,int> trenutniCvor;/*cvor, f(n), g(n), od_koga*/
 
     while(!minHeap.empty()) {
         trenutniCvor = minHeap.pop();
@@ -343,16 +349,11 @@ public:
 
         int x = index_trenutniCvor / broj_kolona;
         int y = index_trenutniCvor % broj_kolona;
-//uporediti ovaj nacin  i verziju sa memorisanjem
-//spstiti bad speculation na manje od 5 %
-        // Heuristika za okolne čvorove
         for(int i = 0; i < 8; i++)
             heuristika_za_okolne_cvorove[i] = Heuristika(x + dx[i], y + dy[i], finish.first, finish.second, 1.0f);
-// probaj odmotati petlju, max 2 threada
         for(int i = 0; i < 8; i++) {
             int nx = x + dx[i];
             int ny = y + dy[i];
-            //smanjiti grid za 1, pa ovaj uslov nece biti potreban
             if(nx < 0 || nx >= broj_redova || ny < 0 || ny >= broj_kolona)
                 continue;
 
@@ -376,122 +377,211 @@ public:
 
     return {-1., std::vector<int>(0)};
   }
-  //Paralelizacija
+  //Paralelizacija bidirectional(pokrene se iz dvije tacke pretraga)
   std::pair<float, std::vector<int>> A_star_v4(std::pair<int,int>start, std::pair<int,int>finish) {
     if(start.first < 0 || start.first >= broj_redova ||
        start.second < 0 || start.second >= broj_kolona ||
        finish.first < 0 || finish.first >= broj_redova ||
        finish.second < 0 || finish.second >= broj_kolona) {
-        throw std::domain_error("Start ili finis van granica");
+      throw std::domain_error("Start ili finis van granica");
     }
+    const int N = broj_redova * broj_kolona;
+    std::vector<std::atomic<uint8_t>> closedBits(N);
+    #pragma omp parallel for schedule(static)
+    for (int i = 0; i < N; i++)
+        closedBits[i].store(0, std::memory_order_relaxed);
 
-    int index_trenutniCvor = start.first * broj_kolona + start.second;
-    int index_finishCvor = finish.first * broj_kolona + finish.second;
+    std::atomic<bool> done{false};
+    std::atomic<int> meet{-1};
 
-    const int dx[8] = { 0, -1, 0, 1, -1, -1, 1, 1 };
-    const int dy[8] = { 1, 0, -1, 0, 1, -1, 1, -1 };
+    std::vector<std::tuple<bool, float, int>>/*obradjen, g(n) ili f(n) ako nije obradjen, od kojeg cvora je dobio */ obradjeniCvoroviA(broj_redova * broj_kolona, std::make_tuple(false, std::numeric_limits<float>::infinity(), 0));
+    std::vector<std::tuple<bool, float, int>>/*obradjen, g(n) ili f(n) ako nije obradjen, od kojeg cvora je dobio */ obradjeniCvoroviB(broj_redova * broj_kolona, std::make_tuple(false, std::numeric_limits<float>::infinity(), 0));
+    #pragma omp parallel sections num_threads(2) shared(obradjeniCvoroviA, obradjeniCvoroviB, closedBits, done, meet)
+    {
+      #pragma omp section
+      {
+        int index_trenutniCvor = start.first * broj_kolona + start.second;
+        int index_finishCvor = finish.first * broj_kolona + finish.second;
 
-    std::vector<std::tuple<bool, float, int>>/*obradjen, g(n) ili f(n) ako niej obradjen, od kojeg cvora je dobio */ obradjeniCvorovi(broj_redova * broj_kolona, std::make_tuple(false, std::numeric_limits<float>::infinity(), 0));
-    DaryHeap<4> minHeap;
-    minHeap.reserve(broj_redova * broj_kolona / 20);
-    minHeap.push(index_trenutniCvor, 0, 0, 0);
+        const int dx[8] = { 0, -1, 0, 1, -1, -1, 1, 1 };
+        const int dy[8] = { 1, 0, -1, 0, 1, -1, 1, -1 };
 
-    std::vector<float> heuristika_za_okolne_cvorove(8);
-    std::tuple<int,float,float,int> trenutniCvor;
+        DaryHeap<4> minHeap;
+        minHeap.reserve(broj_redova * broj_kolona / 20);
+        minHeap.push(index_trenutniCvor, 0, 0, 0);/*cvor, f(n), g(n), od_koga*/
 
-    while(!minHeap.empty()) {
-        trenutniCvor = minHeap.pop();
+        std::vector<float> heuristika_za_okolne_cvorove(8);
+        std::tuple<int,float,float,int> trenutniCvor;/*cvor, f(n), g(n), od_koga*/
 
-        if(std::get<0>(trenutniCvor) == index_finishCvor){
-          std::vector<int> putanja;
-          index_trenutniCvor = std::get<0>(trenutniCvor);
+        while(!minHeap.empty() && !done.load(std::memory_order_relaxed)) {
+            trenutniCvor = minHeap.pop();
 
-          obradjeniCvorovi[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+            if(std::get<0>(trenutniCvor) == index_finishCvor){
+              //Gotovo
+            }
 
-          int trenutni = index_finishCvor;
+            index_trenutniCvor = std::get<0>(trenutniCvor);
+
+            if(std::get<0>(obradjeniCvoroviA[index_trenutniCvor]))
+                continue;
+
+            int x = index_trenutniCvor / broj_kolona;
+            int y = index_trenutniCvor % broj_kolona;
+
+            for(int i = 0; i < 8; i++)
+                heuristika_za_okolne_cvorove[i] = Heuristika(x + dx[i], y + dy[i], finish.first, finish.second, 1.0f);
+            for(int i = 0; i < 8; i++) {
+                int nx = x + dx[i];
+                int ny = y + dy[i];
+
+                if(nx < 0 || nx >= broj_redova || ny < 0 || ny >= broj_kolona)
+                    continue;
+
+                int weight_index = index_trenutniCvor * 8 + i;
+                if(cvorovi_v2[weight_index] == std::numeric_limits<float>::infinity())
+                    continue;
+
+                int index_susjeda = nx * broj_kolona + ny;
+                if(!std::get<0>(obradjeniCvoroviA[index_susjeda])) {
+                    float g_novo = std::get<2>(trenutniCvor) + cvorovi_v2[weight_index];
+                    float f_novo = g_novo + heuristika_za_okolne_cvorove[i];
+                    if(f_novo < std::get<1>(obradjeniCvoroviA[index_susjeda])){
+                      minHeap.push(index_susjeda, f_novo, g_novo, index_trenutniCvor);
+                      std::get<1>(obradjeniCvoroviA[index_susjeda]) = f_novo;
+                    }
+                    if (closedBits[index_susjeda].load(std::memory_order_acquire) & 2) {
+                      if (!done.exchange(true, std::memory_order_acq_rel)){
+                          meet.store(index_susjeda, std::memory_order_release);
+                          obradjeniCvoroviA[index_susjeda] = {true, g_novo, index_trenutniCvor};
+                          closedBits[index_susjeda].fetch_or(1, std::memory_order_acq_rel);
+                      }
+                      break;
+                    }
+                }
+            }
+
+            obradjeniCvoroviA[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+            uint8_t prev = closedBits[index_trenutniCvor].fetch_or(1, std::memory_order_acq_rel);
+            if (prev & 2) {
+                if (!done.exchange(true, std::memory_order_acq_rel))
+                    meet.store(index_trenutniCvor, std::memory_order_release);
+                break;
+            }
+        }
+      }
+      #pragma omp section
+      {
+        int index_trenutniCvor = finish.first * broj_kolona + finish.second;
+        int index_finishCvor = start.first * broj_kolona + start.second;
+
+        const int dx[8] = { 0, -1, 0, 1, -1, -1, 1, 1 };
+        const int dy[8] = { 1, 0, -1, 0, 1, -1, 1, -1 };
+
+        DaryHeap<4> minHeap;
+        minHeap.reserve(broj_redova * broj_kolona / 20);
+        minHeap.push(index_trenutniCvor, 0, 0, 0);
+
+        std::vector<float> heuristika_za_okolne_cvorove(8);
+        std::tuple<int,float,float,int> trenutniCvor;
+
+        while(!minHeap.empty() && !done.load(std::memory_order_relaxed)) {
+            trenutniCvor = minHeap.pop();
+
+            if(std::get<0>(trenutniCvor) == index_finishCvor){
+                //Gotovo
+            }
+
+            index_trenutniCvor = std::get<0>(trenutniCvor);
+
+            if(std::get<0>(obradjeniCvoroviB[index_trenutniCvor]))
+                continue;
+
+            int x = index_trenutniCvor / broj_kolona;
+            int y = index_trenutniCvor % broj_kolona;
+
+            for(int i = 0; i < 8; i++)
+                heuristika_za_okolne_cvorove[i] = Heuristika(x + dx[i], y + dy[i], start.first, start.second, 1.0f);
+            for(int i = 0; i < 8; i++) {
+                int nx = x + dx[i];
+                int ny = y + dy[i];
+
+                if(nx < 0 || nx >= broj_redova || ny < 0 || ny >= broj_kolona)
+                    continue;
+                int weight_index = index_trenutniCvor * 8 + i;
+                if(cvorovi_v2[weight_index] == std::numeric_limits<float>::infinity())
+                    continue;
+
+                int index_susjeda = nx * broj_kolona + ny;
+                if(!std::get<0>(obradjeniCvoroviB[index_susjeda])) {
+                    float g_novo = std::get<2>(trenutniCvor) + cvorovi_v2[weight_index];
+                    float f_novo = g_novo + heuristika_za_okolne_cvorove[i];
+                    if(f_novo < std::get<1>(obradjeniCvoroviB[index_susjeda])){
+                      minHeap.push(index_susjeda, f_novo, g_novo, index_trenutniCvor);
+                      std::get<1>(obradjeniCvoroviB[index_susjeda]) = f_novo;
+                    }
+                  if (closedBits[index_susjeda].load(std::memory_order_acquire) & 1) {
+                    if (!done.exchange(true, std::memory_order_acq_rel)) {
+                        meet.store(index_susjeda, std::memory_order_release);
+                        obradjeniCvoroviB[index_susjeda] = {true, g_novo, index_trenutniCvor};
+                        closedBits[index_susjeda].fetch_or(2, std::memory_order_acq_rel);
+                    }
+                    break;
+                  }
+                }
+            }
+
+            obradjeniCvoroviB[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+            uint8_t prev = closedBits[index_trenutniCvor].fetch_or(2, std::memory_order_acq_rel);
+            if (prev & 1) {
+                if (!done.exchange(true, std::memory_order_acq_rel))
+                    meet.store(index_trenutniCvor, std::memory_order_release);
+                break;
+            }
+        }
+      }
+    }
+    int m = meet.load(std::memory_order_acquire);
+    if (m == -1) return {-1.f, {}};
+    else {
+      std::vector<int> putanja, putanja1, putanja2;
+      #pragma omp parallel sections num_threads(2) shared(putanja1,putanja2)
+      {
+        #pragma omp section
+        {
+          int trenutni = m;
           int start_index = start.first * broj_kolona + start.second;
 
           while(trenutni != start_index) {
-              putanja.push_back(trenutni);
-              trenutni = std::get<2>(obradjeniCvorovi[trenutni]);
+              putanja1.push_back(trenutni);
+              trenutni = std::get<2>(obradjeniCvoroviA[trenutni]);
           }
-          putanja.push_back(start_index);  // dodaj i start
-
-          return {std::get<2>(trenutniCvor), putanja};
+          putanja1.push_back(start_index);
         }
+        #pragma omp section
+        {
+          int trenutni = m;
+          int finish_index = finish.first * broj_kolona + finish.second;
 
-        index_trenutniCvor = std::get<0>(trenutniCvor);
-
-        if(std::get<0>(obradjeniCvorovi[index_trenutniCvor]))
-            continue;
-
-        int x = index_trenutniCvor / broj_kolona;
-        int y = index_trenutniCvor % broj_kolona;
-//uporediti ovaj nacin  i verziju sa memorisanjem
-//spstiti bad speculation na manje od 5 %
-        // Heuristika za okolne čvorove
-        //#pragma omp parallel for num_threads(2)
-        //for(int i = 0; i < 8; i++)
-            //heuristika_za_okolne_cvorove[i] = Heuristika(x + dx[i], y + dy[i], finish.first, finish.second, 1.0f);
-            /*
-          heuristika_za_okolne_cvorove[0] = Heuristika(x, y + 1, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[1] = Heuristika(x - 1, y, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[2] = Heuristika(x, y - 1, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[3] = Heuristika(x + 1, y, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[4] = Heuristika(x - 1, y + 1, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[5] = Heuristika(x - 1, y - 1, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[6] = Heuristika(x + 1, y + 1, finish.first, finish.second, 1.0f);
-          heuristika_za_okolne_cvorove[7] = Heuristika(x + 1, y - 1, finish.first, finish.second, 1.0f);*/
-          alignas(32) float heuristika_za_okolne_cvorove[8];
-
-          __m256 finish_x = _mm256_set1_ps(finish.first);
-          __m256 finish_y = _mm256_set1_ps(finish.second);
-
-          __m256 nx_vec = _mm256_set_ps(x+1, x+1, x-1, x-1, x+1, x, x-1, x);
-          __m256 ny_vec = _mm256_set_ps(y-1, y+1, y-1, y+1, y, y-1, y, y+1);
-
-          __m256 dx_vec = _mm256_sub_ps(nx_vec, finish_x);
-          __m256 dy_vec = _mm256_sub_ps(ny_vec, finish_y);
-
-          __m256 dx2 = _mm256_mul_ps(dx_vec, dx_vec);
-          __m256 dy2 = _mm256_mul_ps(dy_vec, dy_vec);
-          __m256 dist = _mm256_sqrt_ps(_mm256_add_ps(dx2, dy2));
-
-          _mm256_store_ps(heuristika_za_okolne_cvorove, dist);
-
-// probaj odmotati petlju, max 2 threada
-        for(int i = 0; i < 8; i++) {
-            int nx = x + dx[i];
-            int ny = y + dy[i];
-            //smanjiti grid za 1, pa ovaj uslov nece biti potreban
-            if(nx < 0 || nx >= broj_redova || ny < 0 || ny >= broj_kolona)
-                continue;
-
-            int weight_index = index_trenutniCvor * 8 + i;
-            if(cvorovi_v2[weight_index] == std::numeric_limits<float>::infinity())
-                continue;
-
-            int index_susjeda = nx * broj_kolona + ny;
-            if(!std::get<0>(obradjeniCvorovi[index_susjeda])) {
-                float g_novo = std::get<2>(trenutniCvor) + cvorovi_v2[weight_index];
-                float f_novo = g_novo + heuristika_za_okolne_cvorove[i];
-                if(f_novo < std::get<1>(obradjeniCvorovi[index_susjeda])){
-                  minHeap.push(index_susjeda, f_novo, g_novo, index_trenutniCvor);
-                  std::get<1>(obradjeniCvorovi[index_susjeda]) = f_novo;
-                }
-            }
+          while(trenutni != finish_index) {
+              putanja2.push_back(trenutni);
+              trenutni = std::get<2>(obradjeniCvoroviB[trenutni]);
+          }
+          putanja2.push_back(finish_index);
         }
-
-        obradjeniCvorovi[index_trenutniCvor] = {true, std::get<2>(trenutniCvor), std::get<3>(trenutniCvor)};
+      }
+      std::reverse(putanja1.begin(), putanja1.end());
+      putanja.insert(putanja.end(), putanja1.begin(), putanja1.end());
+      if (!putanja2.empty()) {
+          putanja.insert(putanja.end(), putanja2.begin() + 1, putanja2.end());
+      }
+      return {std::get<1>(obradjeniCvoroviA[m])+std::get<1>(obradjeniCvoroviB[m]), putanja};
     }
-
-    return {-1., std::vector<int>(0)};
   }
 };
 int main()
 {
-    const int rows = 10000;
-    const int cols = 10000;
+    const int rows = 1000;
+    const int cols = 1000;
     std::pair<int,int> start = {0, 0};
     std::pair<int,int> finish = {rows - 1, cols - 1};
 
@@ -505,6 +595,7 @@ int main()
     // 2D vector
     //std::vector<std::vector<float>> cvorovi2d(rows * cols, std::vector<float>(8));
     // flatten vector
+    /*
     std::vector<float> cvorovi_flat(rows * cols * 8);
 
     for(int x = 0; x < rows; x++){
@@ -522,7 +613,7 @@ int main()
                 cvorovi_flat[index_flat + i] = value;
             }
         }
-    }
+    }*/
 
     /* Test 2D vector
     std::cout << "Test 2D vector..." << std::endl;
@@ -536,15 +627,71 @@ int main()
     else
         std::cout << "Put nije pronaden!\n";
     std::cout << "Vrijeme (2D vector): " << trajanje2d.count() << " sekundi\n";*/
+    std::vector<float> cvorovi_flat(rows * cols * 8,
+                                    std::numeric_limits<float>::infinity());
 
+    const int dx[8]  = { 0, -1, 0, 1, -1, -1, 1, 1 };
+    const int dy[8]  = { 1,  0,-1, 0,  1, -1, 1,-1 };
+    const int opp[8] = { 2,  3, 0, 1,  7,  6, 5, 4 };
+
+    // Generiši samo "polovinu" ivica pa preslikaj na drugu stranu
+    for (int x = 0; x < rows; x++) {
+      for (int y = 0; y < cols; y++) {
+        int u = x * cols + y;
+
+        for (int i = 0; i < 8; i++) {
+          int nx = x + dx[i];
+          int ny = y + dy[i];
+          if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+
+          int v = nx * cols + ny;
+
+          // Da ne dupliramo: kreiraj težinu samo kad je u < v
+          if (u < v) {
+            float w;
+            if (wall(gen) < 0.05f) w = std::numeric_limits<float>::infinity();
+            else                   w = dis(gen);
+
+            cvorovi_flat[u * 8 + i]        = w;           // u -> v
+            cvorovi_flat[v * 8 + opp[i]]   = w;           // v -> u (suprotni smjer)
+          }
+        }
+      }
+    }
+    auto ispisiPutanju = [&](const std::vector<int>& p) {
+    std::cout << "Duzina putanje: " << p.size() << " cvorova.\n";
+
+    // Ako je putanja preduga, ispisemo samo pocetak i kraj
+    if (p.size() > 20) {
+        std::cout << "Putanja (prvih 5 -> ... -> zadnjih 5): ";
+        for (size_t i = 0; i < 5; i++) {
+            int idx = p[i];
+            std::cout << "(" << idx / cols << "," << idx % cols << ") -> ";
+        }
+        std::cout << " ... ";
+        for (size_t i = p.size() - 5; i < p.size(); i++) {
+            int idx = p[i];
+            std::cout << " -> (" << idx / cols << "," << idx % cols << ")";
+        }
+    } else {
+        // Ako je kratka, ispisemo sve
+        std::cout << "Putanja: ";
+        for (int idx : p) {
+            std::cout << "(" << idx / cols << "," << idx % cols << ") -> ";
+        }
+    }
+    std::cout << "CILJ\n";
+};
     std::cout << "Test flatten vector1..." << std::endl;
     Graf graf_flat(cvorovi_flat, rows, cols);
     auto t1 = std::chrono::high_resolution_clock::now();
     auto path_cost_flat1 = graf_flat.A_star_v3(start, finish);
     auto t2 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> trajanje_flat1 = t2 - t1;
-    if(path_cost_flat1.first >= 0)
+    if(path_cost_flat1.first >= 0){
         std::cout << "Put pronadjen, cijena: " << path_cost_flat1.first << "\n";
+        ispisiPutanju(path_cost_flat1.second);
+    }
     else
         std::cout << "Put nije pronaden!\n";
     std::cout << "Vrijeme (flatten vector): " << trajanje_flat1.count() << " sekundi\n";
@@ -555,12 +702,12 @@ int main()
     auto path_cost_flat = graf_flat.A_star_v4(start, finish);
     auto t4 = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> trajanje_flat = t4 - t3;
-    if(path_cost_flat.first >= 0)
+    if(path_cost_flat.first >= 0){
         std::cout << "Put pronadjen, cijena: " << path_cost_flat.first << "\n";
+        ispisiPutanju(path_cost_flat.second);
+    }
     else
         std::cout << "Put nije pronaden!\n";
     std::cout << "Vrijeme (flatten vector): " << trajanje_flat.count() << " sekundi\n";
-    int dfsuih;
-    std::cin >> dfsuih;
     return 0;
 }
